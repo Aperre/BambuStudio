@@ -136,14 +136,14 @@ SettingIdMigrationResult migrate_manual_spool_setting_id(FilamentSpool& s)
     auto* bundle = wxGetApp().preset_bundle;
     if (!bundle)
         return result;
-    if (filament_exists_by_filament_id(s.setting_id))
+    if (filament_exists_by_filament_id(s.filament_id))
         return result;
 
     result.attempted           = true;
-    result.original_setting_id = s.setting_id;
+    result.original_setting_id = s.filament_id;
 
     bool exact_match = false;
-    auto resolved = bundle->resolve_filament_for_spool(s.setting_id,
+    auto resolved = bundle->resolve_filament_for_spool(s.filament_id,
                                                        s.brand,
                                                        s.material_type,
                                                        &exact_match);
@@ -151,12 +151,12 @@ SettingIdMigrationResult migrate_manual_spool_setting_id(FilamentSpool& s)
     if (!resolved.has_value() || resolved->filament_id.empty())
         return result;
 
-    s.setting_id = resolved->filament_id;
+    s.filament_id = resolved->filament_id;
     result.repaired = true;
     BOOST_LOG_TRIVIAL(info)
         << "[FilaCloudSync] repaired manual spool setting_id spool_id=" << s.spool_id
         << " old_setting_id=" << result.original_setting_id
-        << " new_setting_id=" << s.setting_id
+        << " new_setting_id=" << s.filament_id
         << " exact_match=" << (exact_match ? 1 : 0);
     return result;
 }
@@ -508,13 +508,13 @@ void wgtFilaManagerCloudSync::merge_pulled_spools(const nlohmann::json& list)
             const bool keep_existing_migration_state = existing
                 && (existing->entry_method == "manual" || existing->entry_method.empty())
                 && existing->setting_id_migration_version >= kFilamentSpoolSettingIdMigrationVersion
-                && !filament_exists_by_filament_id(cloud_spool.setting_id)
-                && (filament_exists_by_filament_id(existing->setting_id)
-                    || (existing->setting_id == cloud_spool.setting_id
+                && !filament_exists_by_filament_id(cloud_spool.filament_id)
+                && (filament_exists_by_filament_id(existing->filament_id)
+                    || (existing->filament_id == cloud_spool.filament_id
                         && existing->brand == cloud_spool.brand
                         && existing->material_type == cloud_spool.material_type));
             if (keep_existing_migration_state) {
-                cloud_spool.setting_id = existing->setting_id;
+                cloud_spool.filament_id = existing->filament_id;
                 cloud_spool.setting_id_migration_version = existing->setting_id_migration_version;
             }
             const SettingIdMigrationResult migration = migrate_manual_spool_setting_id(cloud_spool);
@@ -563,7 +563,7 @@ void wgtFilaManagerCloudSync::merge_pulled_spools(const nlohmann::json& list)
             if (migration.repaired && dispatcher) {
                 dispatcher->enqueue_push_update(
                     cloud_spool.spool_id,
-                    nlohmann::json{{"setting_id", cloud_spool.setting_id}});
+                    nlohmann::json{{"setting_id", cloud_spool.filament_id}});
             }
         }
 

@@ -862,16 +862,16 @@ void AMSMaterialsSetting::on_select_ok(wxCommandEvent& event)
         if (sp) {
             // GitHub #11937: resolve through filament_id > setting_id >
             // vendor+type > "Generic <type>" instead of assuming
-            // sp->setting_id is already a valid Preset::filament_id, so a
+            // sp->filament_id is already a valid Preset::filament_id, so a
             // spool with a cloud user-settings id or a free-typed brand can
             // still be confirmed into the AMS slot.
-            std::string resolved_filament_id = sp->setting_id;
+            std::string resolved_filament_id = sp->filament_id;
             if (auto* bundle = wxGetApp().preset_bundle) {
-                if (auto info = bundle->resolve_filament_for_spool(sp->setting_id, sp->brand, sp->material_type))
+                if (auto info = bundle->resolve_filament_for_spool(sp->filament_id, sp->brand, sp->material_type))
                     resolved_filament_id = info->filament_id;
             }
             filament_item.filament_id = resolved_filament_id;
-            filament_item.setting_id  = sp->setting_id;
+            filament_item.setting_id  = sp->filament_id;
             filament_item.spool_id    = sp->spool_id;
         }
     }
@@ -1686,7 +1686,7 @@ static void _populate_filament_combobox_grouped(
             // spools become selectable instead of being bucketed as
             // "Unsupported Filaments" forever.
             bool has_preset = bundle &&
-                bundle->resolve_filament_for_spool(sp->setting_id, sp->brand, sp->material_type).has_value();
+                bundle->resolve_filament_for_spool(sp->filament_id, sp->brand, sp->material_type).has_value();
             if (has_preset) {
                 wxString brand = sp->brand.empty() ? other_bucket : wxString::FromUTF8(sp->brand);
                 lib_brand_to_spools[brand].push_back(*sp);
@@ -1731,7 +1731,7 @@ static void _populate_filament_combobox_grouped(
                 bool note_truncated = false;
                 wxBitmap row_bmp = _render_spool_row_bitmap(combo, sp, row_width, sp.in_printer, &note_truncated);
                 const int spool_style = sp.in_printer ? DD_ITEM_STYLE_DISABLED : 0;
-                wxString spool_display_text = _spool_display_name(sp);
+                wxString spool_display_text = spool_display_name(sp);
                 if (!sp.color_name.empty())
                     spool_display_text += " " + wxString::FromUTF8(sp.color_name);
                 int idx = combo->Append(spool_display_text, row_bmp, group_key, nullptr, spool_style);
@@ -1780,7 +1780,7 @@ static void _populate_filament_combobox_grouped(
             const bool is_unsupported = true;
             wxBitmap row_bmp = _render_spool_row_bitmap(combo, sp, row_width, sp.in_printer || is_unsupported, &note_truncated);
             const int spool_style = DD_ITEM_STYLE_DISABLED;
-            wxString unsupported_display_text = _spool_display_name(sp);
+            wxString unsupported_display_text = spool_display_name(sp);
             if (!sp.color_name.empty())
                 unsupported_display_text += " " + wxString::FromUTF8(sp.color_name);
             int idx = combo->Append(unsupported_display_text, row_bmp, unsupported_group, nullptr, spool_style);
@@ -2785,9 +2785,9 @@ void AMSMaterialsSetting::apply_filament_selection()
         const FilamentSpool* sp = store ? store->get_spool(m_selected_spool_id) : nullptr;
         if (sp && preset_bundle) {
             // GitHub #11937: same tolerant resolution as on_select_ok() —
-            // sp->setting_id may be a cloud user-settings id or empty
+            // sp->filament_id may be a cloud user-settings id or empty
             // rather than a real Preset::filament_id.
-            auto fila_info = preset_bundle->resolve_filament_for_spool(sp->setting_id, sp->brand, sp->material_type);
+            auto fila_info = preset_bundle->resolve_filament_for_spool(sp->filament_id, sp->brand, sp->material_type);
             if (fila_info.has_value()) {
                 ams_filament_id = fila_info->filament_id;
                 ams_setting_id  = fila_info->setting_id;
