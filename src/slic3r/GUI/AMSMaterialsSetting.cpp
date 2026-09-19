@@ -860,7 +860,17 @@ void AMSMaterialsSetting::on_select_ok(wxCommandEvent& event)
         auto* store = wxGetApp().fila_manager_store();
         const FilamentSpool* sp = store ? store->get_spool(m_selected_spool_id) : nullptr;
         if (sp) {
-            filament_item.filament_id = sp->filament_id;
+            // GitHub #11937: resolve through filament_id > setting_id >
+            // vendor+type > "Generic <type>" instead of assuming
+            // sp->filament_id is already a valid Preset::filament_id, so a
+            // spool with a cloud user-settings id or a free-typed brand can
+            // still be confirmed into the AMS slot.
+            std::string resolved_filament_id = sp->filament_id;
+            if (auto* bundle = wxGetApp().preset_bundle) {
+                if (auto info = bundle->resolve_filament_for_spool(sp->filament_id, sp->brand, sp->material_type))
+                    resolved_filament_id = info->filament_id;
+            }
+            filament_item.filament_id = resolved_filament_id;
             filament_item.setting_id  = sp->filament_id;
             filament_item.spool_id    = sp->spool_id;
         }
@@ -1582,6 +1592,274 @@ void remember_ams_recent_filament_preset(
 
 } // namespace
 
+static void _populate_filament_combobox_grouped(
+    ::ComboBox*                                    combo,
+    const wxArrayString&                           filament_items,
+    const std::unordered_map<wxString, wxString>&  query_filament_vendors,
+    const std::unordered_map<wxString, wxString>&  query_filament_types,
+    const std::vector<wxString>&                   recent_filament_items,
+    std::map<int, std::string>*                    out_idx_to_spool_id = nullptr)
+{
+    if (!combo) return;
+
+    const wxString other_bucket = _L("Other");
+    static const std::vector<wxString> priority_brands{ "Bambu Lab", "Generic", "Polymaker" };
+    static const std::vector<wxString> sorted_types{ "PLA", "PETG", "ABS", "TPU" };
+
+    // ── Section 2 (System presets): bucket aliases by vendor ──
+    std::map<wxString, std::vector<wxString>> brand_to_aliases;
+    for (const wxString& alias : filament_items) {
+        wxString vendor;
+        auto it = query_filament_vendors.find(alias);
+        if (it != query_filament_vendors.end()) vendor = it->second;
+        if (vendor.IsEmpty()) vendor = other_bucket;
+        brand_to_aliases[vendor].push_back(alias);
+    }
+    auto _intra_bucket_sorter = [&query_filament_types](const wxString& l, const wxString& r) -> bool {
+        {
+            const std::vector<std::string>& sorted_names = get_filament_orders();
+            auto i1 = std::find(sorted_names.cbegin(), sorted_names.cend(), l);
+            auto i2 = std::find(sorted_names.cbegin(), sorted_names.cend(), r);
+            if (i1 != i2) return std::distance(i1, i2) > 0;
+        }
+        {
+            wxString lt, rt;
+            auto il = query_filament_types.find(l);
+            auto ir = query_filament_types.find(r);
+            if (il != query_filament_types.end()) lt = il->second;
+            if (ir != query_filament_types.end()) rt = ir->second;
+            static const std::vector<wxString> st{ "PLA", "PETG", "ABS", "TPU" };
+            auto i1 = std::find(st.begin(), st.end(), lt);
+            auto i2 = std::find(st.begin(), st.end(), rt);
+            if (i1 != i2) return i1 < i2;
+        }
+        return l < r;
+    };
+    for (auto& kv : brand_to_aliases)
+        std::sort(kv.second.begin(), kv.second.end(), _intra_bucket_sorter);
+
+    // Keep recently used system presets in their shared recency order. This is
+    // an additive shortcut group: the aliases stay in their vendor buckets so
+    // they remain reachable under the brand they belong to.
+    std::vector<wxString> recent_aliases;
+
+    for (const wxString& recent : recent_filament_items) {
+        for (const auto& [vendor, aliases] : brand_to_aliases) {
+            auto alias_it =
+                std::find(aliases.begin(), aliases.end(), recent);
+
+            if (alias_it == aliases.end())
+                continue;
+
+            recent_aliases.emplace_back(*alias_it);
+            break;
+        }
+    }
+
+    std::vector<wxString> ordered_brands;
+    for (const wxString& b : priority_brands)
+        if (brand_to_aliases.count(b)) ordered_brands.push_back(b);
+    for (const auto& kv : brand_to_aliases) {
+        if (kv.first == other_bucket) continue;
+        if (std::find(priority_brands.begin(), priority_brands.end(), kv.first) != priority_brands.end()) continue;
+        ordered_brands.push_back(kv.first);
+    }
+    auto tail_begin = ordered_brands.begin() + (int)std::count_if(
+        priority_brands.begin(), priority_brands.end(),
+        [&](const wxString& b){ return brand_to_aliases.count(b) > 0; });
+    std::sort(tail_begin, ordered_brands.end());
+    if (brand_to_aliases.count(other_bucket)) ordered_brands.push_back(other_bucket);
+
+    // ── Section 1 (Filament Manager): bucket spools by brand ──
+    std::map<wxString, std::vector<Slic3r::GUI::FilamentSpool>> lib_brand_to_spools;
+    std::vector<Slic3r::GUI::FilamentSpool> unsupported_spools;
+    if (auto* store = wxGetApp().fila_manager_store()) {
+        BOOST_LOG_TRIVIAL(info) << "[AMSMaterialsSetting] fila_manager_store spool count=" << store->all_spool_ids().size();
+        const auto* bundle = wxGetApp().preset_bundle;
+        for (const auto& spool_id : store->all_spool_ids()) {
+            const Slic3r::GUI::FilamentSpool* sp = store->get_spool(spool_id);
+            if (!sp) continue;
+            // GitHub #11937: a manually-added spool may carry a cloud
+            // user-settings id (or nothing, for a free-typed third-party
+            // brand) in setting_id instead of a real Preset::filament_id.
+            // Fall back through vendor+type and "Generic <type>" so those
+            // spools become selectable instead of being bucketed as
+            // "Unsupported Filaments" forever.
+            bool has_preset = bundle &&
+                bundle->resolve_filament_for_spool(sp->filament_id, sp->brand, sp->material_type).has_value();
+            if (has_preset) {
+                wxString brand = sp->brand.empty() ? other_bucket : wxString::FromUTF8(sp->brand);
+                lib_brand_to_spools[brand].push_back(*sp);
+            } else {
+                unsupported_spools.push_back(*sp);
+            }
+        }
+    }
+    for (auto& kv : lib_brand_to_spools)
+        std::sort(kv.second.begin(), kv.second.end(),
+            [](const Slic3r::GUI::FilamentSpool& a, const Slic3r::GUI::FilamentSpool& b){
+                return a.series < b.series; });
+
+    std::vector<wxString> ordered_lib_brands;
+    for (const wxString& b : priority_brands)
+        if (lib_brand_to_spools.count(b)) ordered_lib_brands.push_back(b);
+    for (const auto& kv : lib_brand_to_spools) {
+        if (kv.first == other_bucket) continue;
+        if (std::find(priority_brands.begin(), priority_brands.end(), kv.first) != priority_brands.end()) continue;
+        ordered_lib_brands.push_back(kv.first);
+    }
+    auto lib_tail = ordered_lib_brands.begin() + (int)std::count_if(
+        priority_brands.begin(), priority_brands.end(),
+        [&](const wxString& b){ return lib_brand_to_spools.count(b) > 0; });
+    std::sort(lib_tail, ordered_lib_brands.end());
+    if (lib_brand_to_spools.count(other_bucket)) ordered_lib_brands.push_back(other_bucket);
+
+    combo->Clear();
+
+    // Section 1
+    combo->Append(_L("Filament Manager"), wxNullBitmap, DD_ITEM_STYLE_SPLIT_ITEM);
+    if (!ordered_lib_brands.empty() || !unsupported_spools.empty()) {
+        const int row_width = std::min(
+            std::max(combo->GetSize().GetWidth(), combo->FromDIP(260)),
+            combo->FromDIP(360)
+        );
+        for (const wxString& brand : ordered_lib_brands) {
+            const auto& spools = lib_brand_to_spools[brand];
+            const wxString group_key = wxString::Format("%s (%d)", brand,
+                                                        static_cast<int>(spools.size()));
+            for (const Slic3r::GUI::FilamentSpool& sp : spools) {
+                bool note_truncated = false;
+                wxBitmap row_bmp = _render_spool_row_bitmap(combo, sp, row_width, sp.in_printer, &note_truncated);
+                const int spool_style = sp.in_printer ? DD_ITEM_STYLE_DISABLED : 0;
+                wxString spool_display_text = spool_display_name(sp);
+                if (!sp.color_name.empty())
+                    spool_display_text += " " + wxString::FromUTF8(sp.color_name);
+                int idx = combo->Append(spool_display_text, row_bmp, group_key, nullptr, spool_style);
+                if (idx >= 0) {
+                    if (out_idx_to_spool_id)
+                        (*out_idx_to_spool_id)[idx] = sp.spool_id;
+                    wxString tip;
+                    if (sp.in_printer) {
+                        wxString dev_display;
+                        if (!sp.device_name.empty()) {
+                            dev_display = wxString::FromUTF8(sp.device_name);
+                        } else if (!sp.dev_id.empty()) {
+                            const wxString id = wxString::FromUTF8(sp.dev_id);
+                            dev_display = id.length() > 5
+                                ? id.Left(3) + "***" + id.Right(2)
+                                : "***";
+                        }
+                        tip = dev_display.empty()
+                            ? _L("In printer")
+                            : wxString::Format(_L("In printer: %s"), dev_display);
+                        if (!sp.slot_id.empty()) {
+                            wxString slot_label;
+                            if (sp.ams_id >= 0) {
+                                try {
+                                    int tray_id = sp.ams_id * 4 + std::stoi(sp.slot_id);
+                                    slot_label = wxGetApp().transition_tridid(tray_id);
+                                } catch (...) {}
+                            }
+                            if (slot_label.empty())
+                                slot_label = wxString::FromUTF8(sp.slot_id);
+                            tip += wxString::Format(", %s", slot_label);
+                        }
+                    }
+                    if (note_truncated && !sp.note.empty()) {
+                        if (!tip.empty()) tip += "\n";
+                        tip += wxString(_CTX_utf8(L_CONTEXT("Note","Filament Manager"),"Filament Manager")) + ": " + wxString::FromUTF8(sp.note);
+                    }
+                    if (!tip.empty())
+                        combo->SetItemTooltip(static_cast<unsigned int>(idx), tip);
+                }
+            }
+        }
+        const wxString unsupported_group = _L("Unsupported Filaments");
+        for (const Slic3r::GUI::FilamentSpool& sp : unsupported_spools) {
+            bool note_truncated = false;
+            const bool is_unsupported = true;
+            wxBitmap row_bmp = _render_spool_row_bitmap(combo, sp, row_width, sp.in_printer || is_unsupported, &note_truncated);
+            const int spool_style = DD_ITEM_STYLE_DISABLED;
+            wxString unsupported_display_text = spool_display_name(sp);
+            if (!sp.color_name.empty())
+                unsupported_display_text += " " + wxString::FromUTF8(sp.color_name);
+            int idx = combo->Append(unsupported_display_text, row_bmp, unsupported_group, nullptr, spool_style);
+            if (idx >= 0) {
+                wxString tip;
+                if (sp.in_printer) {
+                    wxString dev_display;
+                    if (!sp.device_name.empty()) {
+                        dev_display = wxString::FromUTF8(sp.device_name);
+                    } else if (!sp.dev_id.empty()) {
+                        const wxString id = wxString::FromUTF8(sp.dev_id);
+                        dev_display = id.length() > 5
+                            ? id.Left(3) + "***" + id.Right(2)
+                            : "***";
+                    }
+                    tip = dev_display.empty()
+                        ? _L("In printer")
+                        : wxString::Format(_L("In printer: %s"), dev_display);
+                    if (!sp.slot_id.empty()) {
+                        wxString slot_label;
+                        if (sp.ams_id >= 0) {
+                            try {
+                                int tray_id = sp.ams_id * 4 + std::stoi(sp.slot_id);
+                                slot_label = wxGetApp().transition_tridid(tray_id);
+                            } catch (...) {}
+                        }
+                        if (slot_label.empty())
+                            slot_label = wxString::FromUTF8(sp.slot_id);
+                        tip += wxString::Format(", %s", slot_label);
+                    }
+                }
+                if (note_truncated && !sp.note.empty()) {
+                    if (!tip.empty()) tip += "\n";
+                    tip += wxString(_CTX_utf8(L_CONTEXT("Note","Unsupported Filaments"),"Unsupported Filaments")) + ": " + wxString::FromUTF8(sp.note);
+                }
+                if (!tip.empty())
+                    combo->SetItemTooltip(static_cast<unsigned int>(idx), tip);
+            }
+        }
+        if (unsupported_spools.empty())
+            combo->Append(_L("No unsupported filaments"),
+                          wxNullBitmap, unsupported_group, nullptr, DD_ITEM_STYLE_DISABLED);
+    } else {
+        combo->Append(_L("No filaments"),
+                      wxNullBitmap, wxEmptyString, nullptr, DD_ITEM_STYLE_DISABLED);
+    }
+
+    // Section 2
+    if (!recent_aliases.empty() || !ordered_brands.empty()) {
+        combo->Append(
+            _L("System presets"),
+            wxNullBitmap,
+            DD_ITEM_STYLE_SPLIT_ITEM);
+
+        if (!recent_aliases.empty()) {
+            const wxString recent_group = _L("Recently used");
+
+            for (const wxString& alias : recent_aliases) {
+                combo->Append(
+                    alias,
+                    wxNullBitmap,
+                    recent_group,
+                    nullptr,
+                    0);
+            }
+        }
+
+        for (const wxString& brand : ordered_brands) {
+            for (const wxString& alias : brand_to_aliases[brand]) {
+                combo->Append(
+                    alias,
+                    wxNullBitmap,
+                    brand,
+                    nullptr,
+                    0);
+            }
+        }
+    }
+}
 
 static void _collect_filament_info(const wxString& shown_name,
                                    const Preset& filament,
@@ -2506,7 +2784,10 @@ void AMSMaterialsSetting::apply_filament_selection()
         auto* store = wxGetApp().fila_manager_store();
         const FilamentSpool* sp = store ? store->get_spool(m_selected_spool_id) : nullptr;
         if (sp && preset_bundle) {
-            auto fila_info = preset_bundle->get_filament_by_filament_id(sp->filament_id);
+            // GitHub #11937: same tolerant resolution as on_select_ok() —
+            // sp->filament_id may be a cloud user-settings id or empty
+            // rather than a real Preset::filament_id.
+            auto fila_info = preset_bundle->resolve_filament_for_spool(sp->filament_id, sp->brand, sp->material_type);
             if (fila_info.has_value()) {
                 ams_filament_id = fila_info->filament_id;
                 ams_setting_id  = fila_info->setting_id;
