@@ -38,10 +38,6 @@ private:
     static bool slot_pin_still_valid(const FilamentSpool& sp,
                                      const DevAmsTray&    tray);
 
-    void check_new_filament_hint(MachineObject* obj);
-    void notify_new_filament_hint(const std::string& ams_id,
-                                  const std::string& slot_id,
-                                  bool               show);
     bool check_print_finished_and_deduct(MachineObject* obj);
     wgtFilaManagerStore* m_store;
     std::map<std::string, bool> m_prev_tray_exists;
