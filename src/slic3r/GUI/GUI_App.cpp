@@ -2503,55 +2503,6 @@ void GUI_App::init_download_path()
 static LogEncOptions s_get_log_enc_opts()
 {
     LogEncOptions enc_options;
-
-#if BBL_RELEASE_TO_PUBLIC
-    std::string region_str;
-    if (wxGetApp().app_config && !wxGetApp().app_config->get("region").empty()) {
-        region_str = wxGetApp().app_config->get("region");
-    };
-
-    const auto& config_path = AppConfig::config_path(AppConfig::EAppMode::Editor);
-    try {
-        if (boost::filesystem::exists(config_path)) {
-            boost::nowide::ifstream json_file(config_path.c_str());
-            if (json_file.is_open()) {
-                nlohmann::json config_jj;
-                json_file >> config_jj;
-                if (config_jj.contains("app")) {
-                    const nlohmann::json& app_jj = config_jj["app"];
-                    region_str = app_jj.contains("region") ? app_jj["region"].get<std::string>() : "";
-                }
-            }
-        }
-    } catch (...) {
-        assert(0 && "get_value_from_config failed");
-    }// there are file errors
-
-    enc_options.enc_type = LogEncOptions::LOG_ENC_AES_256_CBC;
-    if (enc_options.enc_type == LogEncOptions::LOG_ENC_AES_256_CBC) {
-        std::string enc_key_url;
-        std::string enc_key_host_env;
-        if (!region_str.empty()) {
-            if (region_str == "CHN" || region_str == "China" || region_str == "CN") {
-                enc_key_url = wxGetApp().get_http_url("CN", "v1/analysis-st/tag/");
-                enc_key_host_env = "cn";
-            } else {
-                enc_key_url = wxGetApp().get_http_url("US", "v1/analysis-st/tag/");
-                enc_key_host_env = "us";
-            }
-        } else {
-            enc_key_url = "";
-            enc_key_host_env = "dc";
-        }
-
-        enc_options.enc_key_url = enc_key_url;
-        enc_options.enc_key_host_env = enc_key_host_env;
-    }
-
-#else
-    enc_options.enc_type = LogEncOptions::LOG_ENC_NONE;
-#endif
-
     return enc_options;
 };
 
@@ -2670,10 +2621,8 @@ void GUI_App::update_log_sink_region()
     app_config->save();
 
     const auto& enc_opts = s_get_log_enc_opts();
-    if (enc_opts.enc_type != LogEncOptions::LOG_ENC_NONE) {
-        const auto& log_filename = LogSinkUtil::get_log_filaname_format(enc_opts);
-        update_log_sink(log_filename, enc_opts);
-    }
+    const auto& log_filename = LogSinkUtil::get_log_filaname_format(enc_opts);
+    update_log_sink(log_filename, enc_opts);
 }
 
 // returns true if found newer version and user agreed to use it
