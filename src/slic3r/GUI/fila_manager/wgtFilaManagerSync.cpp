@@ -48,7 +48,6 @@ bool wgtFilaManagerSync::on_device_update(MachineObject* obj)
     if (!obj->is_online()) return false;
     calibrate_pending_badges(obj);
     check_and_register_new_rfid_spools(obj);
-    check_new_filament_hint(obj);
     const bool sync_changed   = sync_all_trays(obj);
     const bool deduct_changed = check_print_finished_and_deduct(obj);
     return sync_changed || deduct_changed;
