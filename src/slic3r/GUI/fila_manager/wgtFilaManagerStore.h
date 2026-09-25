@@ -114,6 +114,9 @@ struct FilamentSpool {
     bool        favorite          = false;
     double      net_weight        = 0;
 
+    // Local print-consumption bookkeeping.
+    std::string last_deducted_job_key;
+    bool        weight_push_pending = false;
 
     bool        cloud_synced      = false;
     // Internal bookkeeping for GitHub #11937 manual-spool setting_id repair.
